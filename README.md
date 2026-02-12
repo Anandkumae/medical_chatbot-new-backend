@@ -52,7 +52,7 @@ backend/
 └── README.md
 Installation
 1. Clone the repository
-git clone https://github.com/your-username/project-name.git
+git clone https://github.com/Anandkumae/medical_chatbot-new-backend.git
 cd backend
 2. Create virtual environment
 python -m venv venv
