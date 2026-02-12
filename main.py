@@ -3,38 +3,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import os
+import logging
 from dotenv import load_dotenv
 from vector_db import vector_db
-import logging
 from document_routes import router as document_router
+from assessment_routes import router as assessment_router
+from translation import translation_service
+from typing import Optional
 
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-
-app = FastAPI(title="Medical Chatbot API", version="1.0.0")
-
-# Include document routes
-app.include_router(document_router)
+app = FastAPI(title="Medical Chatbot API", version="2.0.0")
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Load environment variables
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: Optional[str] = None
+    language: Optional[str] = 'en'  # Language preference: 'en', 'hi', 'mr'
+
+class ChatResponse(BaseModel):
+    choices: list
+    session_id: Optional[str] = None
+    language: Optional[str] = 'en'
 
 @app.get("/")
-async def root():
-    return {"message": "Medical Chatbot API is running"}
+def root():
+    return {"message": "Medical Chatbot API with Guided Assessment"}
 
 @app.get("/health")
 async def health_check():
@@ -53,13 +63,23 @@ def chat(req: ChatRequest):
         logger.error(f"Error searching vector database: {e}")
         context = "No specific medical information found."
     
+    # Translate user message to English for processing if needed
+    processed_message = req.message
+    if req.language and req.language != 'en':
+        try:
+            # For now, we'll process in English and translate the response
+            # In a production system, you might want to translate the input too
+            logger.info(f"Processing message in language: {req.language}")
+        except Exception as e:
+            logger.error(f"Translation error: {e}")
+    
     prompt = f"""
 You are a medical assistant AI. Use the following medical information to help answer the user's symptoms, but always prioritize safety and recommend professional medical care when appropriate.
 
 Medical Context:
 {context}
 
-User Symptoms: {req.message}
+User Symptoms: {processed_message}
 
 Instructions:
 1. Analyze the symptoms based on the provided medical context
@@ -67,12 +87,13 @@ Instructions:
 3. Suggest precautions the user can take
 4. Recommend whether to see a doctor (always recommend professional medical care for serious symptoms)
 5. Include a clear disclaimer that this is not medical advice
+6. Use simple, clear language that's easy to understand
 
 Response Format:
-- **Possible Causes:** [list based on context]
-- **Precautions:** [list of safe measures]
-- **When to See a Doctor:** [clear guidance]
-- **Disclaimer:** This AI assistant provides general information and is not a substitute for professional medical care. Always consult with a qualified healthcare provider for medical concerns.
+- Possible Causes: [list based on context]
+- Precautions: [list of safe measures]
+- When to See a Doctor: [clear guidance]
+- Disclaimer: This AI assistant provides general information and is not a substitute for professional medical care. Always consult with a qualified healthcare provider for medical concerns.
 """
 
     try:
@@ -87,13 +108,38 @@ Response Format:
                 "messages": [{"role": "user", "content": prompt}],
             },
         )
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Translate response if needed
+            if req.language and req.language != 'en':
+                try:
+                    translated_content = translation_service.translate_text(
+                        result['choices'][0]['message']['content'], 
+                        req.language
+                    )
+                    result['choices'][0]['message']['content'] = translated_content
+                    logger.info(f"Response translated to {req.language}")
+                except Exception as e:
+                    logger.error(f"Translation failed: {e}")
+                    # Keep original English response if translation fails
+            
+            # Add language info to response
+            result['language'] = req.language
+            return result
+        else:
+            logger.error(f"OpenRouter API error: {response.status_code} - {response.text}")
+            return {"error": "Failed to get response from AI service"}
+            
+    except Exception as e:
         logger.error(f"Error calling OpenRouter API: {e}")
-        return {"error": f"Failed to get response from AI: {str(e)}"}
+        return {"error": "Failed to connect to AI service"}
 
-# New endpoints for document management
+# Include routers
+app.include_router(document_router, prefix="/documents")
+app.include_router(assessment_router)
+
 @app.post("/documents/upload")
 async def upload_document(text: str, metadata: dict = None):
     """Upload a new document to the vector database."""
